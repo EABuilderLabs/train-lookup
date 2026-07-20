@@ -526,7 +526,10 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
     ['Run time', Math.floor(runSpan / 60) ? Math.floor(runSpan / 60) + 'h ' + (runSpan % 60) + 'm' : runSpan + ' min'],
     ['Progress', Math.round(doneFrac * 100) + '% · stop ' + stopsPassed + ' of ' + st.length],
   ];
-  if (curMp !== undefined) cells.push(['Milepost', 'MP ' + curMp.toFixed(1)]);
+  // Show the tile whenever the line has milepost data, with "—" where the
+  // train's current spot has no trustworthy value — a vanishing tile reads
+  // as broken, but a dash reads as an answer.
+  if (mps) cells.push(['Milepost', curMp !== undefined ? 'MP ' + curMp.toFixed(1) : 'MP —']);
   document.getElementById('rGrid').innerHTML = cells.map(c =>
     '<div class="cell"><div class="k">' + c[0] + '</div><div class="v">' + c[1] + '</div></div>').join('');
 
