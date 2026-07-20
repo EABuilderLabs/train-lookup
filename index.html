@@ -530,6 +530,7 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
   // train's current spot has no trustworthy value — a vanishing tile reads
   // as broken, but a dash reads as an answer.
   if (mps) cells.push(['Milepost', curMp !== undefined ? 'MP ' + curMp.toFixed(1) : 'MP —']);
+  cells.push(['Lat', pinLat.toFixed(4)], ['Long', pinLon.toFixed(4)]);
   document.getElementById('rGrid').innerHTML = cells.map(c =>
     '<div class="cell"><div class="k">' + c[0] + '</div><div class="v">' + c[1] + '</div></div>').join('');
 
