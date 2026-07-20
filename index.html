@@ -505,6 +505,17 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
   document.getElementById('rStatus').textContent = statusTxt;
   document.getElementById('rSubStatus').textContent = subTxt;
 
+  const mps = (META.mileposts || {})[route[0]];
+  const mpOf = i => (mps ? mps[stName(i)] : undefined);
+  let curMp;
+  if (pos.kind === 'before') curMp = mpOf(origin[0]);
+  else if (pos.kind === 'after') curMp = mpOf(dest[0]);
+  else if (pos.kind === 'at') curMp = mpOf(st[pos.i][0]);
+  else {
+    const mpA = mpOf(st[pos.i][0]), mpB = mpOf(st[pos.i + 1][0]);
+    if (mpA !== undefined && mpB !== undefined) curMp = mpA + (mpB - mpA) * pos.frac;
+  }
+
   const runSpan = dest[1] - origin[2];
   const doneFrac = pos.kind === 'before' ? 0 : pos.kind === 'after' ? 1 :
     Math.min(1, Math.max(0, (m - origin[2]) / (runSpan || 1)));
@@ -515,20 +526,25 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
     ['Run time', Math.floor(runSpan / 60) ? Math.floor(runSpan / 60) + 'h ' + (runSpan % 60) + 'm' : runSpan + ' min'],
     ['Progress', Math.round(doneFrac * 100) + '% · stop ' + stopsPassed + ' of ' + st.length],
   ];
+  if (curMp !== undefined) cells.push(['Milepost', 'MP ' + curMp.toFixed(1)]);
   document.getElementById('rGrid').innerHTML = cells.map(c =>
     '<div class="cell"><div class="k">' + c[0] + '</div><div class="v">' + c[1] + '</div></div>').join('');
 
-  let rows = '<tr><th>Station</th><th>Arrives</th><th>Departs</th></tr>';
+  let rows = '<tr><th>Station</th>' + (mps ? '<th>MP</th>' : '') + '<th>Arrives</th><th>Departs</th></tr>';
   st.forEach(([id, arr, dep], i) => {
     const cls = hiRows.includes(i) ? ' class="target"' : (pos.kind !== 'before' && i < hiRows[0] ? ' class="done"' : '');
-    rows += '<tr' + cls + '><td>' + stName(id) + '</td><td>' + fmtMin(arr) + '</td><td>' + fmtMin(dep) + '</td></tr>';
+    const mp = mpOf(id);
+    rows += '<tr' + cls + '><td>' + stName(id) + '</td>' +
+      (mps ? '<td>' + (mp !== undefined ? mp.toFixed(1) : '—') + '</td>' : '') +
+      '<td>' + fmtMin(arr) + '</td><td>' + fmtMin(dep) + '</td></tr>';
   });
   document.getElementById('rTable').innerHTML = rows;
 
   document.getElementById('rSource').textContent =
     'Scheduled position from NJ Transit GTFS schedules published at the time (coverage ' + coverageLabel() +
     ', built ' + META.generated + ') · Not real-time — actual trains may have varied. ' +
-    'Position between stations is approximated on a straight line.';
+    'Position between stations is approximated on a straight line.' +
+    (mps ? ' Mileposts approximated from the FRA grade-crossing inventory.' : '');
 
   drawMap(data, trip, pinLat, pinLon, '#' + route[1]);
 

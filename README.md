@@ -19,6 +19,13 @@ don't carry public train numbers). Positions between stations are interpolated
 on a straight line from the schedule, and are **scheduled, not actual** — a
 delayed or cancelled train will not be reflected.
 
+Where available, results also show the **official NJ Transit milepost**,
+calibrated from the FRA grade-crossing inventory (~900 public crossings with
+official MPs; `tools/crossings.json`). Lines without usable crossings for
+calibration (Northeast Corridor, North Jersey Coast, Meadowlands, Princeton
+Shuttle) show no milepost. Values are approximations — typically within a few
+tenths of a mile.
+
 ## Data layout
 
 - `data.js` — small manifest (`window.TT_META`): which years are covered
