@@ -94,6 +94,7 @@
   }
   .go:hover { filter: brightness(1.06); }
   .go:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .go:disabled { opacity: 0.5; cursor: wait; }
 
   .status {
     font-family: 'IBM Plex Mono', ui-monospace, monospace;
@@ -270,9 +271,10 @@
 <script src="data.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-const D = window.TT_DATA;
+const META = window.TT_META;
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 let map = null, mapLayers = null;
+const yearLoads = {}; // year -> Promise
 
 // Defaults: today, now
 const now = new Date();
@@ -314,8 +316,46 @@ function prevDateKey(dateStr) {
 
 function normNum(s) { return String(s).trim().toUpperCase().replace(/^0+(?=.)/, ''); }
 
+function coverageLabel() {
+  const ys = Object.keys(META.years).sort();
+  return fmtDateKey(META.years[ys[0]].from) + ' – ' + fmtDateKey(META.years[ys[ys.length - 1]].to);
+}
+
+// Lazy-load data/data-YYYY.js; resolves to window.TT_YEARS[year] or null if unavailable
+function ensureYear(year) {
+  if (!META.years[year]) return Promise.resolve(null);
+  if (window.TT_YEARS && window.TT_YEARS[year]) return Promise.resolve(window.TT_YEARS[year]);
+  yearLoads[year] ??= new Promise(resolve => {
+    const s = document.createElement('script');
+    s.src = 'data/data-' + year + '.js';
+    s.onload = () => resolve(window.TT_YEARS[year] || null);
+    s.onerror = () => { delete yearLoads[year]; resolve(null); };
+    document.head.appendChild(s);
+  });
+  return yearLoads[year];
+}
+
+function runsOn(trip, dateKey) {
+  // Trip day bitmask is per calendar year, bit index = day-of-year
+  const y = +dateKey.slice(0, 4);
+  const doy = Math.round((new Date(y, +dateKey.slice(4, 6) - 1, +dateKey.slice(6, 8)) - new Date(y, 0, 1)) / 86400000);
+  const byte = parseInt(trip.d.substr((doy >> 3) * 2, 2), 16);
+  return !!(byte >> (doy & 7) & 1);
+}
+
+function tripDates(trip, year) {
+  const out = [];
+  const y0 = new Date(+year, 0, 1);
+  for (let doy = 0; doy < 366; doy++) {
+    if (parseInt(trip.d.substr((doy >> 3) * 2, 2), 16) >> (doy & 7) & 1) {
+      const d = new Date(y0.getTime() + doy * 86400000);
+      out.push(d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0'));
+    }
+  }
+  return out;
+}
+
 function dayPattern(dates) {
-  // Summarize which weekdays a set of "YYYYMMDD" keys covers
   const dows = new Set(dates.map(k => new Date(+k.slice(0, 4), +k.slice(4, 6) - 1, +k.slice(6, 8)).getDay()));
   const has = d => dows.has(d);
   if ([1, 2, 3, 4, 5].every(has) && !has(0) && !has(6)) return 'weekdays';
@@ -340,73 +380,90 @@ function positionAt(trip, minute) {
   return { kind: 'at', i: st.length - 1 };
 }
 
-function lookup() {
+async function lookup() {
   const numRaw = document.getElementById('train').value;
   const dateStr = document.getElementById('date').value;
   const timeStr = document.getElementById('time').value;
   const report = document.getElementById('report');
+  const btn = document.getElementById('go');
 
-  if (!D) { setStatus('data.js is missing — run: node tools/build-data.mjs', true); return; }
+  if (!META) { setStatus('data.js is missing — run: node tools/build-data.mjs', true); return; }
   if (!normNum(numRaw)) { setStatus('Enter a train number.', true); return; }
   if (!dateStr) { setStatus('Pick a date.', true); return; }
   if (!timeStr) { setStatus('Pick a time.', true); return; }
 
   const num = normNum(numRaw);
   const dateKey = dateKeyOf(dateStr);
-  const minute = parseInt(timeStr.slice(0, 2), 10) * 60 + parseInt(timeStr.slice(3, 5), 10);
-
-  const allForNum = D.trips.filter(t => normNum(t.t) === num);
-  if (!allForNum.length) {
-    report.classList.remove('show');
-    setStatus('No train #' + num + ' in the current schedule data (feed covers ' +
-      fmtDateKey(D.feedStart) + ' – ' + fmtDateKey(D.feedEnd) + ').', true);
-    return;
-  }
-
-  if (dateKey < D.feedStart || dateKey > D.feedEnd) {
-    report.classList.remove('show');
-    setStatus('That date is outside this data set. NJ Transit’s public schedule file covers ' +
-      fmtDateKey(D.feedStart) + ' – ' + fmtDateKey(D.feedEnd) + '. ' +
-      (dateKey < D.feedStart
-        ? 'Earlier dates aren’t in NJ Transit’s public file, so they can’t be looked up.'
-        : 'For future periods, refresh the data (see README).'), true);
-    return;
-  }
-
-  // Match on the query date, and on the previous service day for after-midnight trains
   const prevKey = prevDateKey(dateStr);
-  const candidates = [];
-  for (const t of allForNum) {
-    const dates = D.services[t.s] || [];
-    if (dates.includes(dateKey)) candidates.push({ trip: t, svcDate: dateKey, m: minute });
-    if (dates.includes(prevKey) && minute + 1440 <= t.st[t.st.length - 1][1] + 120) {
-      candidates.push({ trip: t, svcDate: prevKey, m: minute + 1440 });
+  const minute = parseInt(timeStr.slice(0, 2), 10) * 60 + parseInt(timeStr.slice(3, 5), 10);
+  const year = dateKey.slice(0, 4), prevYear = prevKey.slice(0, 4);
+
+  btn.disabled = true;
+  try {
+    // Coverage checks against the manifest before loading anything
+    const yMeta = META.years[year];
+    if (!yMeta || dateKey < yMeta.from || dateKey > yMeta.to) {
+      // Allow near-boundary miss to still explain itself clearly
+      report.classList.remove('show');
+      setStatus('No schedule data for ' + fmtDateKey(dateKey) + '. This build covers ' + coverageLabel() +
+        (yMeta && dateKey < yMeta.from ? ' (note: ' + year + ' data begins ' + fmtDateKey(yMeta.from) + ').' : '.') +
+        ' See README to extend or refresh the data.', true);
+      return;
     }
-  }
 
-  if (!candidates.length) {
-    report.classList.remove('show');
-    const runDates = [...new Set(allForNum.flatMap(t => D.services[t.s] || []))].sort();
-    setStatus('Train #' + num + ' doesn’t run on ' + fmtDateKey(dateKey) + '. It runs ' +
-      dayPattern(runDates) + ', ' + fmtDateKey(runDates[0]) + ' – ' + fmtDateKey(runDates[runDates.length - 1]) + '.', true);
-    return;
-  }
+    setStatus('Loading ' + year + ' schedules…');
+    const [yData, pData] = await Promise.all([ensureYear(year), ensureYear(prevYear)]);
+    if (!yData) {
+      report.classList.remove('show');
+      setStatus('Could not load data/data-' + year + '.js — rebuild the data (see README).', true);
+      return;
+    }
 
-  // Prefer a candidate that is mid-run at the queried moment
-  candidates.sort((a, b) => {
-    const rank = c => { const k = positionAt(c.trip, c.m).kind; return k === 'before' ? 1 : k === 'after' ? 2 : 0; };
-    return rank(a) - rank(b);
-  });
-  const { trip, svcDate, m } = candidates[0];
-  setStatus('');
-  render(trip, svcDate, dateKey, m, timeStr);
+    const candidates = [];
+    for (const t of yData.trips) {
+      if (normNum(t.t) === num && runsOn(t, dateKey)) candidates.push({ data: yData, trip: t, svcDate: dateKey, m: minute });
+    }
+    if (pData) {
+      for (const t of pData.trips) {
+        if (normNum(t.t) === num && runsOn(t, prevKey) &&
+            minute + 1440 <= t.st[t.st.length - 1][1] + 120) {
+          candidates.push({ data: pData, trip: t, svcDate: prevKey, m: minute + 1440 });
+        }
+      }
+    }
+
+    if (!candidates.length) {
+      report.classList.remove('show');
+      const sameNum = yData.trips.filter(t => normNum(t.t) === num);
+      if (!sameNum.length) {
+        setStatus('No train #' + num + ' found in ' + year + ' schedules.', true);
+      } else {
+        const dates = [...new Set(sameNum.flatMap(t => tripDates(t, year)))].sort();
+        setStatus('Train #' + num + ' doesn’t run on ' + fmtDateKey(dateKey) + '. In ' + year +
+          ' it runs ' + dayPattern(dates) + ', ' + fmtDateKey(dates[0]) + ' – ' +
+          fmtDateKey(dates[dates.length - 1]) + '.', true);
+      }
+      return;
+    }
+
+    // Prefer a candidate that is mid-run at the queried moment
+    candidates.sort((a, b) => {
+      const rank = c => { const k = positionAt(c.trip, c.m).kind; return k === 'before' ? 1 : k === 'after' ? 2 : 0; };
+      return rank(a) - rank(b);
+    });
+    const c = candidates[0];
+    setStatus('');
+    render(c.data, c.trip, c.svcDate, dateKey, c.m, timeStr);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
-function render(trip, svcDate, queryDateKey, m, timeStr) {
-  const route = D.routes[trip.r];
+function render(data, trip, svcDate, queryDateKey, m, timeStr) {
+  const route = data.routes[trip.r];
   const st = trip.st;
   const pos = positionAt(trip, m);
-  const stName = id => D.stations[id][0];
+  const stName = i => data.stations[i][0];
   const origin = st[0], dest = st[st.length - 1];
 
   document.getElementById('rTrain').textContent = 'Train ' + trip.t + ' to ' + trip.h;
@@ -422,11 +479,11 @@ function render(trip, svcDate, queryDateKey, m, timeStr) {
   if (pos.kind === 'before') {
     statusTxt = 'Not yet departed';
     subTxt = 'Scheduled to leave ' + stName(origin[0]) + ' at ' + fmtMin(origin[2]) + '.';
-    [, pinLat, pinLon] = D.stations[origin[0]]; hiRows = [0];
+    [, pinLat, pinLon] = data.stations[origin[0]]; hiRows = [0];
   } else if (pos.kind === 'after') {
     statusTxt = 'Run completed';
     subTxt = 'Arrived at ' + stName(dest[0]) + ' at ' + fmtMin(dest[1]) + '.';
-    [, pinLat, pinLon] = D.stations[dest[0]]; hiRows = [st.length - 1];
+    [, pinLat, pinLon] = data.stations[dest[0]]; hiRows = [st.length - 1];
   } else if (pos.kind === 'at') {
     const s = st[pos.i];
     statusTxt = 'At ' + stName(s[0]);
@@ -434,10 +491,10 @@ function render(trip, svcDate, queryDateKey, m, timeStr) {
     subTxt = next
       ? 'Heading toward ' + trip.h + ' · next stop ' + stName(next[0]) + ' at ' + fmtMin(next[1]) + '.'
       : 'Final stop.';
-    [, pinLat, pinLon] = D.stations[s[0]]; hiRows = [pos.i];
+    [, pinLat, pinLon] = data.stations[s[0]]; hiRows = [pos.i];
   } else {
     const a = st[pos.i], b = st[pos.i + 1];
-    const [ , aLat, aLon] = D.stations[a[0]], [ , bLat, bLon] = D.stations[b[0]];
+    const [, aLat, aLon] = data.stations[a[0]], [, bLat, bLon] = data.stations[b[0]];
     statusTxt = 'Between ' + stName(a[0]) + ' and ' + stName(b[0]);
     subTxt = 'About ' + Math.round(pos.frac * 100) + '% of the way · heading toward ' + trip.h +
       ' · next stop ' + stName(b[0]) + ' at ' + fmtMin(b[1]) + '.';
@@ -451,8 +508,7 @@ function render(trip, svcDate, queryDateKey, m, timeStr) {
   const runSpan = dest[1] - origin[2];
   const doneFrac = pos.kind === 'before' ? 0 : pos.kind === 'after' ? 1 :
     Math.min(1, Math.max(0, (m - origin[2]) / (runSpan || 1)));
-  const stopsPassed = pos.kind === 'before' ? 0 : pos.kind === 'after' ? st.length :
-    (pos.kind === 'at' ? pos.i + 1 : pos.i + 1);
+  const stopsPassed = pos.kind === 'before' ? 0 : pos.kind === 'after' ? st.length : pos.i + 1;
   const cells = [
     ['Origin', stName(origin[0]) + ' ' + fmtMin(origin[2])],
     ['Destination', stName(dest[0]) + ' ' + fmtMin(dest[1])],
@@ -470,11 +526,11 @@ function render(trip, svcDate, queryDateKey, m, timeStr) {
   document.getElementById('rTable').innerHTML = rows;
 
   document.getElementById('rSource').textContent =
-    'Scheduled position from NJ Transit GTFS (feed window ' + fmtDateKey(D.feedStart) + ' – ' +
-    fmtDateKey(D.feedEnd) + ', built ' + D.generated + ') · Not real-time — actual trains may have varied. ' +
+    'Scheduled position from NJ Transit GTFS schedules published at the time (coverage ' + coverageLabel() +
+    ', built ' + META.generated + ') · Not real-time — actual trains may have varied. ' +
     'Position between stations is approximated on a straight line.';
 
-  drawMap(trip, pinLat, pinLon, '#' + route[1]);
+  drawMap(data, trip, pinLat, pinLon, '#' + route[1]);
 
   const rep = document.getElementById('report');
   rep.classList.remove('show');
@@ -482,7 +538,7 @@ function render(trip, svcDate, queryDateKey, m, timeStr) {
   rep.classList.add('show');
 }
 
-function drawMap(trip, pinLat, pinLon, color) {
+function drawMap(data, trip, pinLat, pinLon, color) {
   const el = document.getElementById('map');
   if (typeof L === 'undefined') { el.classList.remove('show'); return; }
   el.classList.add('show');
@@ -494,12 +550,12 @@ function drawMap(trip, pinLat, pinLon, color) {
     mapLayers = L.layerGroup().addTo(map);
   }
   mapLayers.clearLayers();
-  const pts = trip.st.map(([id]) => [D.stations[id][1], D.stations[id][2]]);
+  const pts = trip.st.map(([i]) => [data.stations[i][1], data.stations[i][2]]);
   L.polyline(pts, { color, weight: 3, opacity: 0.75 }).addTo(mapLayers);
-  trip.st.forEach(([id]) => {
-    L.circleMarker([D.stations[id][1], D.stations[id][2]], {
+  trip.st.forEach(([i]) => {
+    L.circleMarker([data.stations[i][1], data.stations[i][2]], {
       radius: 4, color: '#8a94a0', weight: 1, fillColor: '#232b34', fillOpacity: 1
-    }).addTo(mapLayers).bindTooltip(D.stations[id][0]);
+    }).addTo(mapLayers).bindTooltip(data.stations[i][0]);
   });
   L.circleMarker([pinLat, pinLon], {
     radius: 9, color: '#1a1206', weight: 2, fillColor: '#ffb020', fillOpacity: 1
