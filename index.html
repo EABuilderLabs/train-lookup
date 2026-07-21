@@ -363,6 +363,51 @@ function dayPattern(dates) {
   return [1, 2, 3, 4, 5, 6, 0].filter(has).map(d => DAY_NAMES[d]).join(', ');
 }
 
+const WMO = {
+  0: 'Clear', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+  45: 'Fog', 48: 'Freezing fog',
+  51: 'Light drizzle', 53: 'Drizzle', 55: 'Heavy drizzle',
+  56: 'Frz. drizzle', 57: 'Frz. drizzle',
+  61: 'Light rain', 63: 'Rain', 65: 'Heavy rain',
+  66: 'Freezing rain', 67: 'Freezing rain',
+  71: 'Light snow', 73: 'Snow', 75: 'Heavy snow', 77: 'Snow grains',
+  80: 'Showers', 81: 'Showers', 82: 'Heavy showers',
+  85: 'Snow showers', 86: 'Snow showers',
+  95: 'Thunderstorm', 96: 'Thunderstorm', 99: 'Thunderstorm'
+};
+let wxToken = 0;
+
+// Fill the Weather tile for the position/time — same Open-Meteo services as
+// the companion weather-lookup app (forecast API keeps ~3 months of past data
+// and ~2 weeks ahead; the archive API covers older dates).
+async function updateWeather(lat, lon, dateKey, timeStr) {
+  const token = ++wxToken;
+  const el = () => document.getElementById('wxVal');
+  const date = dateKey.slice(0, 4) + '-' + dateKey.slice(4, 6) + '-' + dateKey.slice(6, 8);
+  const ageDays = (Date.now() - new Date(date + 'T00:00:00')) / 86400000;
+  if (ageDays < -15) { if (el()) el().textContent = 'beyond forecast'; return; }
+  const base = ageDays < 10
+    ? 'https://api.open-meteo.com/v1/forecast'
+    : 'https://archive-api.open-meteo.com/v1/archive';
+  try {
+    const res = await fetch(base + '?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4) +
+      '&start_date=' + date + '&end_date=' + date +
+      '&hourly=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=America%2FNew_York');
+    if (!res.ok) throw new Error();
+    const wx = await res.json();
+    if (token !== wxToken || !el()) return;
+    const hh = parseInt(timeStr.slice(0, 2), 10), mm = parseInt(timeStr.slice(3, 5), 10);
+    const hour = mm >= 30 ? Math.min(hh + 1, 23) : hh;
+    const idx = wx.hourly.time.findIndex(t => parseInt(t.slice(11, 13), 10) === hour);
+    const temp = idx !== -1 ? wx.hourly.temperature_2m[idx] : null;
+    const code = idx !== -1 ? wx.hourly.weather_code[idx] : null;
+    el().textContent = temp == null ? '—'
+      : Math.round(temp) + '° · ' + (WMO[code] || '—');
+  } catch (e) {
+    if (token === wxToken && el()) el().textContent = '—';
+  }
+}
+
 function positionAt(trip, minute) {
   // Where is this trip at `minute` (service-day frame)?
   const st = trip.st;
@@ -531,6 +576,7 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
   // as broken, but a dash reads as an answer.
   if (mps) cells.push(['Milepost', curMp !== undefined ? 'MP ' + curMp.toFixed(1) : 'MP —']);
   cells.push(['Lat', pinLat.toFixed(6)], ['Long', pinLon.toFixed(6)]);
+  cells.push(['Weather', '<span id="wxVal">…</span>']);
   document.getElementById('rGrid').innerHTML = cells.map(c =>
     '<div class="cell"><div class="k">' + c[0] + '</div><div class="v">' + c[1] + '</div></div>').join('');
 
@@ -548,8 +594,10 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
     'Scheduled position from NJ Transit GTFS schedules published at the time (coverage ' + coverageLabel() +
     ', built ' + META.generated + ') · Not real-time — actual trains may have varied. ' +
     'Position between stations is approximated on a straight line.' +
-    (mps ? ' Mileposts approximated from the FRA grade-crossing inventory.' : '');
+    (mps ? ' Mileposts approximated from the FRA grade-crossing inventory.' : '') +
+    ' Weather from Open-Meteo.';
 
+  updateWeather(pinLat, pinLon, queryDateKey, timeStr);
   drawMap(data, trip, pinLat, pinLon, '#' + route[1]);
 
   const rep = document.getElementById('report');
