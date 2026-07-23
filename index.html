@@ -363,6 +363,13 @@ function dayPattern(dates) {
   return [1, 2, 3, 4, 5, 6, 0].filter(has).map(d => DAY_NAMES[d]).join(', ');
 }
 
+function havMi(aLat, aLon, bLat, bLon) {
+  const dLat = (bLat - aLat) * Math.PI / 180, dLon = (bLon - aLon) * Math.PI / 180;
+  const s = Math.sin(dLat / 2) ** 2 +
+    Math.cos(aLat * Math.PI / 180) * Math.cos(bLat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return 7917.5 * Math.asin(Math.sqrt(s)); // Earth diameter in miles
+}
+
 const WMO = {
   0: 'Clear', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
   45: 'Fog', 48: 'Freezing fog',
@@ -504,6 +511,15 @@ async function lookup() {
   }
 }
 
+// Schedule-implied average speed from stop a to stop b (straight-line miles
+// over timetable minutes), or null when the schedule allows no time.
+function segSpeed(data, a, b) {
+  const [, aLat, aLon] = data.stations[a[0]], [, bLat, bLon] = data.stations[b[0]];
+  const minutes = b[1] - a[2];
+  if (minutes <= 0) return null;
+  return Math.round(havMi(aLat, aLon, bLat, bLon) / minutes * 60);
+}
+
 function render(data, trip, svcDate, queryDateKey, m, timeStr) {
   const route = data.routes[trip.r];
   const st = trip.st;
@@ -541,7 +557,9 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
     const a = st[pos.i], b = st[pos.i + 1];
     const [, aLat, aLon] = data.stations[a[0]], [, bLat, bLon] = data.stations[b[0]];
     statusTxt = 'Between ' + stName(a[0]) + ' and ' + stName(b[0]);
-    subTxt = 'About ' + Math.round(pos.frac * 100) + '% of the way · heading toward ' + trip.h +
+    const segMph = segSpeed(data, a, b);
+    subTxt = 'About ' + Math.round(pos.frac * 100) + '% of the way' +
+      (segMph ? ' · ~' + segMph + ' mph' : '') + ' · heading toward ' + trip.h +
       ' · next stop ' + stName(b[0]) + ' at ' + fmtMin(b[1]) + '.';
     pinLat = aLat + (bLat - aLat) * pos.frac;
     pinLon = aLon + (bLon - aLon) * pos.frac;
@@ -580,12 +598,14 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
   document.getElementById('rGrid').innerHTML = cells.map(c =>
     '<div class="cell"><div class="k">' + c[0] + '</div><div class="v">' + c[1] + '</div></div>').join('');
 
-  let rows = '<tr><th>Station</th>' + (mps ? '<th>MP</th>' : '') + '<th>Arrives</th><th>Departs</th></tr>';
+  let rows = '<tr><th>Station</th>' + (mps ? '<th>MP</th>' : '') + '<th>MPH</th><th>Arrives</th><th>Departs</th></tr>';
   st.forEach(([id, arr, dep], i) => {
     const cls = hiRows.includes(i) ? ' class="target"' : (pos.kind !== 'before' && i < hiRows[0] ? ' class="done"' : '');
     const mp = mpOf(id);
+    const mph = i > 0 ? segSpeed(data, st[i - 1], st[i]) : null; // avg from previous stop
     rows += '<tr' + cls + '><td>' + stName(id) + '</td>' +
       (mps ? '<td>' + (mp !== undefined ? mp.toFixed(1) : '—') + '</td>' : '') +
+      '<td>' + (mph ?? '—') + '</td>' +
       '<td>' + fmtMin(arr) + '</td><td>' + fmtMin(dep) + '</td></tr>';
   });
   document.getElementById('rTable').innerHTML = rows;
@@ -595,7 +615,7 @@ function render(data, trip, svcDate, queryDateKey, m, timeStr) {
     ', built ' + META.generated + ') · Not real-time — actual trains may have varied. ' +
     'Position between stations is approximated on a straight line.' +
     (mps ? ' Mileposts approximated from the FRA grade-crossing inventory.' : '') +
-    ' Weather from Open-Meteo.';
+    ' Weather from Open-Meteo. Speeds are schedule-implied averages over straight-line distances.';
 
   updateWeather(pinLat, pinLon, queryDateKey, timeStr);
   drawMap(data, trip, pinLat, pinLon, '#' + route[1]);
